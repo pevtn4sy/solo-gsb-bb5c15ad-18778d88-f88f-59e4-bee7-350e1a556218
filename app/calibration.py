@@ -104,13 +104,17 @@ def solve_calibration(data: CalibrationData) -> Calibration:
 
 
 def ensure_calibrated_bounds(
-    plan: LayoutResponse, page_no: int, cal: Calibration
+    plan: LayoutResponse, page_no: int, cal: Calibration,
+    only: set[int] | None = None,
 ) -> None:
     """校验逆变换补偿后该页所有标签仍在纸张范围内。
 
     走纸误差（尤其是缩放）的逆变换会把内容整体放大/平移，补偿量过大会
     使标签落出纸张。出现任何出界标签即阻止校准导出，并给出具体标签与
     修正后坐标，便于用户核对测量数据。
+
+    only 非空时（原位补印）只校验这些 0 基序号对应的标签——补印 SVG
+    只绘制选中标签，未选位置不输出内容，无需参与出界判定。
     """
     page = next((p for p in plan.pages if p.page == page_no), None)
     if page is None:
@@ -119,7 +123,9 @@ def ensure_calibrated_bounds(
     pw, ph = plan.page_width, plan.page_height
     xs, xo = cal.x.scale, cal.x.offset
     ys, yo = cal.y.scale, cal.y.offset
-    for lab in page.labels:
+    for idx, lab in enumerate(page.labels):
+        if only is not None and idx not in only:
+            continue
         x0 = (lab.x - xo) / xs
         y0 = (lab.y - yo) / ys
         x1 = x0 + lab.width / xs

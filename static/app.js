@@ -7,6 +7,8 @@ let lastPlan = null;     // 最近一次 /api/layout 返回的拼版结果
 let lastParams = null;   // 对应的请求参数
 let currentPage = 1;
 let calibrationData = null;  // 已通过求解校验的校准录入（导出时随 /api/svg 发送）
+let reprintMode = false;     // 原位补印模式开关
+const reprintSel = new Map(); // 补印选择：页码 -> Set（0 基页内序号）；界面角标与 API 序号为 +1
 
 /* ---------------- 标签行 ---------------- */
 
@@ -199,6 +201,7 @@ async function renderPage() {
     // 预览显示灰色占用区（仅第一页有），与下载/打印的 SVG 坐标完全一致
     const svg = await fetchSvg(currentPage, { showOccupied: true });
     host.innerHTML = svg;
+    if (reprintMode) applyReprintOverlay();
   } catch (err) {
     host.innerHTML =
       `<div class="svg-error"><strong>无法生成本页 SVG：</strong>${escapeHtml(err.message)}</div>`;
@@ -206,6 +209,115 @@ async function renderPage() {
   $("page-info").textContent = `${currentPage} / ${lastPlan.pages.length}`;
   $("prev-page").disabled = currentPage <= 1;
   $("next-page").disabled = currentPage >= lastPlan.pages.length;
+  updateReprintStatus();
+}
+
+/* ---------------- 原位补印：预览点选与导出 ---------------- */
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function setReprintMode(on) {
+  reprintMode = on;
+  for (const id of ["reprint-hint", "reprint-status", "reprint-clear", "reprint-export"]) {
+    $(id).hidden = !on;
+  }
+  if (on) applyReprintOverlay();
+  else removeReprintOverlay();
+  updateReprintStatus();
+}
+
+function applyReprintOverlay() {
+  if (!lastPlan) return;
+  const host = $("svg-host");
+  const svg = host.querySelector("svg");
+  const page = lastPlan.pages[currentPage - 1];
+  if (!svg || !page) return;
+  removeReprintOverlay();
+  const sel = reprintSel.get(currentPage) || new Set();
+  const layer = document.createElementNS(SVG_NS, "g");
+  layer.setAttribute("class", "reprint-layer");
+  page.labels.forEach((lab, idx) => {
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("class", `rp-hit${sel.has(idx) ? " sel" : ""}`);
+    rect.setAttribute("x", lab.x);
+    rect.setAttribute("y", lab.y);
+    rect.setAttribute("width", lab.width);
+    rect.setAttribute("height", lab.height);
+    rect.dataset.idx = idx;
+    const tag = document.createElementNS(SVG_NS, "text");
+    tag.setAttribute("class", `rp-idx${sel.has(idx) ? " sel" : ""}`);
+    tag.setAttribute("x", Math.min(lab.x + 0.9, lab.x + lab.width - 1));
+    tag.setAttribute("y", lab.y + 2.4);
+    tag.dataset.idx = idx;
+    tag.textContent = `#${idx + 1}`;
+    layer.appendChild(rect);
+    layer.appendChild(tag);
+  });
+  svg.appendChild(layer);
+}
+
+function removeReprintOverlay() {
+  document.querySelectorAll("#svg-host g.reprint-layer").forEach((g) => g.remove());
+}
+
+function toggleReprintSelection(page, idx) {
+  let sel = reprintSel.get(page);
+  if (!sel) { sel = new Set(); reprintSel.set(page, sel); }
+  const on = !sel.has(idx);
+  if (on) sel.add(idx); else sel.delete(idx);
+  if (!sel.size) reprintSel.delete(page);
+  // 只切换本页该序号元素的高亮，不重新请求 SVG（坐标不变）
+  document
+    .querySelectorAll(`#svg-host .reprint-layer [data-idx="${idx}"]`)
+    .forEach((el) => el.classList.toggle("sel", on));
+  updateReprintStatus();
+}
+
+function updateReprintStatus() {
+  const el = $("reprint-status");
+  if (!reprintMode || !lastPlan) { el.textContent = ""; return; }
+  const page = lastPlan.pages[currentPage - 1];
+  const sel = reprintSel.get(currentPage);
+  const n = sel ? sel.size : 0;
+  let other = 0;
+  for (const [p, s] of reprintSel) if (p !== currentPage) other += s.size;
+  el.innerHTML =
+    `本页已选 <strong>${n}</strong> / ${page ? page.labels.length : 0} 个` +
+    (other ? `（其他页共 ${other} 个，补印仅导出当前页）` : "");
+}
+
+async function exportReprintSvg() {
+  if (!lastPlan) return;
+  const sel = reprintSel.get(currentPage);
+  if (!sel || !sel.size) {
+    alert("补印选择为空：请先在本页预览中点击需要补印的标签（可点选多个），再导出本页补印 SVG。");
+    return;
+  }
+  const body = {
+    page: currentPage,
+    indexes: [...sel].sort((a, b) => a - b).map((i) => i + 1), // API 序号从 1 开始
+    show_annotations: $("show-annotations").checked,
+    params: lastParams,
+  };
+  // 补印属于导出 / 打印动作：勾选校准补偿时同样携带校准数据
+  try {
+    const cal = activeCalibration();
+    if (cal) body.calibration = cal;
+  } catch (err) {
+    alert(err.message);
+    return;
+  }
+  try {
+    const resp = await fetch("/api/reprint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw new Error(await apiError(resp, "补印 SVG 生成失败"));
+    downloadBlob(await resp.text(), `reprint-page-${currentPage}.svg`, "image/svg+xml");
+  } catch (err) {
+    alert(err.message);
+  }
 }
 
 /* ---------------- 结果汇总 ---------------- */
@@ -425,6 +537,8 @@ $("params-form").addEventListener("submit", async (e) => {
         : detail);
     }
     lastPlan = await resp.json();
+    // 参数已重新提交：旧页码 / 页内序号可能失效，清空全部补印选择
+    reprintSel.clear();
     renderSummary(lastPlan);
     $("preview-wrap").hidden = false;
     await renderPage();
@@ -448,6 +562,23 @@ $("next-page").addEventListener("click", async () => {
 
 $("show-margins").addEventListener("change", renderPage);
 $("show-annotations").addEventListener("change", renderPage);
+
+// 原位补印：模式开关、预览点选（事件委托到固定的预览容器）、清空与导出
+$("reprint-mode").addEventListener("change", (e) => setReprintMode(e.target.checked));
+$("svg-host").addEventListener("click", (e) => {
+  if (!reprintMode) return;
+  const hit = e.target.closest ? e.target.closest(".rp-hit") : null;
+  if (!hit) return;
+  toggleReprintSelection(currentPage, parseInt(hit.dataset.idx, 10));
+});
+$("reprint-clear").addEventListener("click", () => {
+  reprintSel.delete(currentPage);
+  document
+    .querySelectorAll("#svg-host .reprint-layer .sel")
+    .forEach((el) => el.classList.remove("sel"));
+  updateReprintStatus();
+});
+$("reprint-export").addEventListener("click", exportReprintSvg);
 
 function downloadBlob(text, filename, type) {
   const blob = new Blob([text], { type });

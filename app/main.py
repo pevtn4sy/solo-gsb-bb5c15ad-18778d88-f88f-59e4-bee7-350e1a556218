@@ -19,13 +19,14 @@ from .models import (
     CalibrationData,
     LayoutRequest,
     LayoutResponse,
+    ReprintRequest,
     SvgRequest,
 )
-from .svg import build_calibration_page, build_svg
+from .svg import build_calibration_page, build_reprint_svg, build_svg, resolve_reprint_selection
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-app = FastAPI(title="小批量标签拼版工具", version="1.2.0")
+app = FastAPI(title="小批量标签拼版工具", version="1.3.0")
 
 
 @app.get("/health", tags=["meta"])
@@ -58,6 +59,38 @@ def api_svg(req: SvgRequest) -> Response:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     filename = f"labels-page-{req.page}.svg"
+    return Response(
+        content=svg,
+        media_type="image/svg+xml; charset=utf-8",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+@app.post("/api/reprint", tags=["layout"])
+def api_reprint(req: ReprintRequest) -> Response:
+    """原位补印：按页码 + 页内标签序号（从 1 开始）只导出选中标签。
+
+    服务端仍按 params 计算完整原排版，再只绘制选中标签的轮廓、编号、
+    标注与裁切角线；未选位置、页码标记与页边距线均留白。选中标签的
+    坐标与流水号不重排、不重新编号；提供 calibration 时按逆变换补偿，
+    与 /api/svg 的校准语义一致。选择为空或序号越界返回 HTTP 400。
+    """
+    try:
+        plan = compute_layout(req.params)
+        # 先校验选择（空 / 越界给出明确错误），再拟合校准
+        only = resolve_reprint_selection(plan, req.page, req.indexes)
+        calibration = None
+        if req.calibration is not None:
+            calibration = solve_calibration(req.calibration)
+            # 补印只绘制选中标签，出界校验也仅针对选中标签
+            ensure_calibrated_bounds(plan, req.page, calibration, only=only)
+        svg = build_reprint_svg(
+            plan, req.page, req.indexes, req.show_annotations,
+            calibration=calibration,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    filename = f"reprint-page-{req.page}.svg"
     return Response(
         content=svg,
         media_type="image/svg+xml; charset=utf-8",

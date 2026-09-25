@@ -223,3 +223,41 @@ button:disabled { opacity: 0.45; cursor: default; }
 .cal-result.muted { color: var(--muted); }
 .cal-enable { margin-top: 2px; font-size: 12px; }
 .cal-enable input { margin-right: 2px; }
+
+/* ---------------- 原位补印 ---------------- */
+
+.reprint-bar {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  margin-bottom: 12px; padding: 8px 10px;
+  border: 1px dashed var(--border); border-radius: 8px;
+  font-size: 13px;
+}
+.hint-inline { font-size: 12px; color: var(--muted); line-height: 1.5; flex: 1 1 260px; }
+.reprint-status { font-size: 13px; color: #374151; white-space: nowrap; }
+.reprint-status strong { color: #b45309; }
+.reprint-export {
+  border-color: #d97706; color: #b45309; font-weight: 600;
+}
+.reprint-export:hover { background: #fff7ed; }
+
+/* 预览 SVG 内的点选层（仅补印模式注入；坐标单位即毫米，随 viewBox 缩放） */
+.svg-host svg .rp-hit {
+  fill: rgba(37, 99, 235, 0.07);
+  stroke: rgba(37, 99, 235, 0.35);
+  stroke-width: 0.2;
+  cursor: pointer;
+}
+.svg-host svg .rp-hit:hover { fill: rgba(37, 99, 235, 0.18); }
+.svg-host svg .rp-hit.sel {
+  fill: rgba(217, 119, 6, 0.28);
+  stroke: #d97706;
+  stroke-width: 0.45;
+  stroke-dasharray: 1.6 1;
+}
+.svg-host svg .rp-idx {
+  font-family: Arial, sans-serif;
+  font-size: 2.2px;
+  fill: #6b7280;
+  pointer-events: none;
+}
+.svg-host svg .rp-idx.sel { fill: #b45309; font-weight: bold; }
