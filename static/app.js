@@ -7,6 +7,8 @@ let lastPlan = null;     // 最近一次 /api/layout 返回的拼版结果
 let lastParams = null;   // 对应的请求参数
 let currentPage = 1;
 let calibrationData = null;  // 已通过求解校验的校准录入（导出时随 /api/svg 发送）
+let reprintMode = false;     // 原位补印：点选模式开关
+const reprintSel = new Map();  // 页码 -> Set(页内 0 基序号)，跨页保留选择
 
 /* ---------------- 标签行 ---------------- */
 
@@ -206,6 +208,66 @@ async function renderPage() {
   $("page-info").textContent = `${currentPage} / ${lastPlan.pages.length}`;
   $("prev-page").disabled = currentPage <= 1;
   $("next-page").disabled = currentPage >= lastPlan.pages.length;
+  updateReprintOverlay();
+  updateReprintInfo();
+}
+
+/* ---------------- 原位补印 ---------------- */
+
+function pageSelection(page) {
+  if (!reprintSel.has(page)) reprintSel.set(page, new Set());
+  return reprintSel.get(page);
+}
+
+function updateReprintInfo() {
+  const sel = reprintSel.get(currentPage);
+  const n = sel ? sel.size : 0;
+  $("reprint-count").textContent = n;
+  $("reprint-export").disabled = n === 0;
+}
+
+// 在预览 SVG 上叠加一层透明矩形（坐标为排版毫米，与 viewBox 同源），
+// 点击切换选中；选中的标签以红色高亮。序号 = /api/layout 页内顺序 + 1。
+function updateReprintOverlay() {
+  const svgEl = $("svg-host").querySelector("svg");
+  if (!svgEl) return;
+  svgEl.querySelectorAll(".reprint-overlay").forEach((g) => g.remove());
+  if (!reprintMode || !lastPlan) return;
+  const page = lastPlan.pages.find((p) => p.page === currentPage);
+  if (!page) return;
+  const sel = pageSelection(currentPage);
+  const NS = "http://www.w3.org/2000/svg";
+  const g = document.createElementNS(NS, "g");
+  g.setAttribute("class", "reprint-overlay");
+  page.labels.forEach((lab, i) => {
+    const r = document.createElementNS(NS, "rect");
+    r.setAttribute("x", lab.x);
+    r.setAttribute("y", lab.y);
+    r.setAttribute("width", lab.width);
+    r.setAttribute("height", lab.height);
+    r.setAttribute("class", "reprint-hit" + (sel.has(i) ? " selected" : ""));
+    r.dataset.idx = i;
+    const title = document.createElementNS(NS, "title");
+    title.textContent =
+      `页内序号 #${i + 1}` + (lab.serial ? ` · 编号 ${lab.serial}` : "");
+    r.appendChild(title);
+    g.appendChild(r);
+  });
+  g.addEventListener("click", (e) => {
+    const t = e.target.closest(".reprint-hit");
+    if (!t) return;
+    const i = Number(t.dataset.idx);
+    const s = pageSelection(currentPage);
+    if (s.has(i)) {
+      s.delete(i);
+      t.classList.remove("selected");
+    } else {
+      s.add(i);
+      t.classList.add("selected");
+    }
+    updateReprintInfo();
+  });
+  svgEl.appendChild(g);
 }
 
 /* ---------------- 结果汇总 ---------------- */
@@ -411,6 +473,7 @@ $("params-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   lastParams = collectParams();
   currentPage = 1;
+  reprintSel.clear();  // 参数或排版变化后，原有补印选择不再有效
   try {
     validateParams(lastParams);
     const resp = await fetch("/api/layout", {
@@ -508,6 +571,44 @@ $("print-all").addEventListener("click", async () => {
   win.document.close();
   win.focus();
   setTimeout(() => win.print(), 400);
+});
+
+/* ---------------- 原位补印：事件 ---------------- */
+
+$("reprint-mode").addEventListener("change", (e) => {
+  reprintMode = e.target.checked;
+  for (const id of ["reprint-info", "reprint-export", "reprint-hint"]) {
+    $(id).hidden = !reprintMode;
+  }
+  updateReprintOverlay();
+  updateReprintInfo();
+});
+
+$("reprint-export").addEventListener("click", async () => {
+  const sel = reprintSel.get(currentPage);
+  if (!sel || sel.size === 0) {
+    alert("补印选择为空：请先在预览中点选本页需要补印的标签。");
+    return;
+  }
+  try {
+    const body = {
+      page: currentPage,
+      labels: [...sel].map((i) => i + 1).sort((a, b) => a - b),  // 接口序号为 1 起
+      show_annotations: $("show-annotations").checked,
+      params: lastParams,
+    };
+    const cal = activeCalibration();  // 勾选校准时补印同样按逆变换补偿
+    if (cal) body.calibration = cal;
+    const resp = await fetch("/api/svg/reprint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw new Error(await apiError(resp, "补印 SVG 生成失败"));
+    downloadBlob(await resp.text(), `labels-page-${currentPage}-reprint.svg`, "image/svg+xml");
+  } catch (err) {
+    alert(err.message);
+  }
 });
 
 /* ---------------- 初始数据 ---------------- */

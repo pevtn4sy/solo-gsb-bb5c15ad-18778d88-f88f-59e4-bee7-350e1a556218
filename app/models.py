@@ -177,5 +177,26 @@ class SvgRequest(BaseModel):
     )
 
 
+class ReprintSvgRequest(BaseModel):
+    """原位补印导出请求：按页码 + 页内标签序号（1 起）筛选要重印的标签。
+
+    服务端仍按 params 重新计算完整原排版，再在导出 SVG 中只绘制选中
+    标签的轮廓、编号、标注与裁切角线；未选位置、页码标记与页边距线
+    均留白。坐标与流水号沿用原排版结果，不重排、不重新编号。
+    """
+
+    page: int = Field(1, ge=1)
+    labels: list[int] = Field(
+        default_factory=list,
+        description="本页要补印的标签序号（页内从 1 开始，按 /api/layout 返回顺序）",
+    )
+    show_annotations: bool = True
+    params: LayoutRequest
+    calibration: CalibrationData | None = Field(
+        None,
+        description="打印位置校准数据；提供时与 /api/svg 一样按逆变换修正坐标",
+    )
+
+
 class SvgResponse(BaseModel):
     svg: str

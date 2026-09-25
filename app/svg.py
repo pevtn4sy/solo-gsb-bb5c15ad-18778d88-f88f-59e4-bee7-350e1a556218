@@ -20,6 +20,12 @@ calibration，坐标与 /api/layout 返回完全一致。
 最终坐标空间按标签补偿后的内框自动选取；即便最小可读字号，编号
 仍会超出标签内宽时抛出明确中文错误（/api/svg 返回 400），绝不
 输出越界文字。未启用编号的标签保持「名称 + 尺寸」原标注。
+
+原位补印：build_svg 传入 only（页内 0 基序号集合）时进入补印模式——
+排版仍由 compute_layout 完整算出，本函数只绘制选中标签的轮廓、
+编号、标注与裁切角线；未选标签、页码标记与页边距线一律不输出。
+裁切角线的避让判定仍使用完整排版（未选标签已印在纸上，角线不得
+侵入），选中标签的坐标与流水号保持原排版结果，不重排、不重新编号。
 """
 
 from __future__ import annotations
@@ -281,13 +287,40 @@ def _serial_elements(
     return "".join(parts)
 
 
-def build_svg(plan: LayoutResponse, page_no: int,
-              show_margins: bool = True, show_annotations: bool = True,
-              show_occupied: bool = False,
-              calibration: Calibration | None = None) -> str:
+def resolve_reprint_selection(
+    plan: LayoutResponse, page_no: int, indices: list[int]
+) -> set[int]:
+    """校验补印筛选（页码 + 页内标签序号，序号从 1 开始），返回 0 基序号集合。
+
+    三类明确中文错误：页码超出范围、选择为空、页内序号超出范围。
+    重复序号去重；序号顺序不影响结果。
+    """
     page = next((p for p in plan.pages if p.page == page_no), None)
     if page is None:
         raise ValueError(f"页码超出范围：共 {len(plan.pages)} 页，请求第 {page_no} 页。")
+    if not indices:
+        raise ValueError(
+            "补印选择为空：请先在拼版预览中点选本页需要补印的标签，再导出补印 SVG。"
+        )
+    total = len(page.labels)
+    for n in indices:
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1 or n > total:
+            raise ValueError(
+                f"页内标签序号 {n} 超出范围：第 {page_no} 页共排入 {total} 个标签"
+                f"（有效序号 1–{total}）。"
+            )
+    return {n - 1 for n in indices}
+
+
+def build_svg(plan: LayoutResponse, page_no: int,
+              show_margins: bool = True, show_annotations: bool = True,
+              show_occupied: bool = False,
+              calibration: Calibration | None = None,
+              only: set[int] | None = None) -> str:
+    page = next((p for p in plan.pages if p.page == page_no), None)
+    if page is None:
+        raise ValueError(f"页码超出范围：共 {len(plan.pages)} 页，请求第 {page_no} 页。")
+    reprint = only is not None
 
     # 逆变换：打印机满足 实测 = scale·设计 + offset，导出写入 设计' 使得
     # scale·设计' + offset = 设计，即 (设计 - offset) / scale。
@@ -337,10 +370,18 @@ def build_svg(plan: LayoutResponse, page_no: int,
             f"offset={calibration.x.offset}mm；Y scale={calibration.y.scale} "
             f"offset={calibration.y.offset}mm（按逆变换补偿） -->"
         )
+    if reprint:
+        picked = sorted(i + 1 for i in only)
+        parts.append(
+            f"<!-- 原位补印：第 {page_no} 页共 {len(page.labels)} 个标签，"
+            f"本次补印 {len(picked)} 个（页内序号 "
+            f"{', '.join(str(i) for i in picked)}）；坐标与流水号保持原排版，"
+            "未选位置、页码与页边距线留白 -->"
+        )
 
     # 占用区仅存在于第一张纸；仅在预览（show_occupied）时绘制，
-    # 下载 / 打印的 SVG 跳过本块（连同其专用样式），因此只含新标签。
-    if show_occupied and page_no == 1 and plan.occupied_zones:
+    # 下载 / 打印 / 补印的 SVG 跳过本块（连同其专用样式），因此只含新标签。
+    if show_occupied and not reprint and page_no == 1 and plan.occupied_zones:
         parts.append(
             '<defs><pattern id="occHatch" patternUnits="userSpaceOnUse" '
             'width="3" height="3" patternTransform="rotate(45)">'
@@ -366,7 +407,7 @@ def build_svg(plan: LayoutResponse, page_no: int,
                     "已占用</text>"
                 )
 
-    if show_margins:
+    if show_margins and not reprint:
         mx0, my0 = fx(plan.margin_left), fy(plan.margin_top)
         mx1, my1 = fx(w - plan.margin_right), fy(h - plan.margin_bottom)
         parts.append(
@@ -376,7 +417,8 @@ def build_svg(plan: LayoutResponse, page_no: int,
 
     # 角线避让用几何（全部在最终 SVG 坐标空间，校准时即补偿后坐标）：
     # 纸张矩形——物理纸边映射回本坐标系为 fx(0)/fx(w)（校准时并非 0/w）；
-    # 本页每个标签轮廓；首页占用区（即便导出不绘制占用区，角线仍须避让）。
+    # 本页每个标签轮廓（补印时含未选标签：它们已印在纸上，角线同样避让）；
+    # 首页占用区（即便导出不绘制占用区，角线仍须避让）。
     paper_rect = (fx(0), fy(0), fx(w), fy(h))
     label_rects = [
         (
@@ -396,6 +438,8 @@ def build_svg(plan: LayoutResponse, page_no: int,
         ]
 
     for idx, lab in enumerate(page.labels):
+        if reprint and idx not in only:
+            continue  # 补印模式：未选位置留白，坐标与编号保持原排版
         lx, ly, lw, lh = fx(lab.x), fy(lab.y), fw(lab.width), fh(lab.height)
         parts.append(
             f'<rect class="label" x="{_fmt(lx)}" y="{_fmt(ly)}" '
@@ -427,10 +471,11 @@ def build_svg(plan: LayoutResponse, page_no: int,
                 f'font-size="{_fmt(min(fs, 2.0))}mm">{size_txt}</text>'
             )
 
-    parts.append(
-        f'<text class="pageno" x="{_fmt(fx(w / 2))}" y="{_fmt(fy(h - 2))}">'
-        f"Page {page.page} / {len(plan.pages)}</text>"
-    )
+    if not reprint:
+        parts.append(
+            f'<text class="pageno" x="{_fmt(fx(w / 2))}" y="{_fmt(fy(h - 2))}">'
+            f"Page {page.page} / {len(plan.pages)}</text>"
+        )
     parts.append("</svg>")
     return "\n".join(parts)
 

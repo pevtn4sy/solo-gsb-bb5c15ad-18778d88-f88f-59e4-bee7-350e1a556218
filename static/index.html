@@ -123,6 +123,14 @@
             <button type="button" id="print-all">打印全部页</button>
           </div>
         </div>
+        <div class="reprint-bar">
+          <label class="inline" title="补印模式：在下方预览中点选漏印 / 损坏的标签，导出只含选中标签的本页 SVG">
+            <input type="checkbox" id="reprint-mode" /> 原位补印（点选漏印 / 损坏标签）
+          </label>
+          <span id="reprint-info" class="reprint-info" hidden>本页已选 <strong id="reprint-count">0</strong> 个标签</span>
+          <button type="button" id="reprint-export" hidden>导出本页补印 SVG</button>
+          <span id="reprint-hint" class="reprint-hint" hidden>点击预览中的标签进行选择 / 取消；坐标与流水号保持原排版，不重新编号。</span>
+        </div>
         <div id="svg-host" class="svg-host"></div>
       </div>
     </section>

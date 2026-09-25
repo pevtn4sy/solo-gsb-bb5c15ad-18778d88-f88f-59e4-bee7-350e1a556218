@@ -38,19 +38,19 @@ def main() -> int:
     import re
 
     def _cut_segments_of(svg_text: str):
-        """解析 cutmarks，返回每段子线 (x0,y0,x1,y1)（轴对齐）。"""
-        m = re.search(r'<g class="cutmarks"[^>]*><path d="([^"]*)"', svg_text)
-        if not m:
-            return []
+        """解析全部 cutmarks 组，返回每段子线 (x0,y0,x1,y1)（轴对齐）。"""
         out = []
-        for x, y, axis, end in re.findall(
-            r"M(-?[\d.]+) (-?[\d.]+) ([VH])(-?[\d.]+)", m.group(1)
+        for m in re.finditer(
+            r'<g class="cutmarks"[^>]*><path d="([^"]*)"', svg_text
         ):
-            x, y, end = float(x), float(y), float(end)
-            if axis == "H":
-                out.append((min(x, end), y, max(x, end), y))
-            else:
-                out.append((x, min(y, end), x, max(y, end)))
+            for x, y, axis, end in re.findall(
+                r"M(-?[\d.]+) (-?[\d.]+) ([VH])(-?[\d.]+)", m.group(1)
+            ):
+                x, y, end = float(x), float(y), float(end)
+                if axis == "H":
+                    out.append((min(x, end), y, max(x, end), y))
+                else:
+                    out.append((x, min(y, end), x, max(y, end)))
         return out
 
     # 裁切角线避让：20×20mm 标签、0 间距紧贴、40mm 纸宽下两列铺满，
@@ -438,6 +438,64 @@ def main() -> int:
             sx0 < zc[2] - 1e-6 and sx1 > zc[0] + 1e-6
             and sy0 < zc[3] - 1e-6 and sy1 > zc[1] + 1e-6
         ), f"校准角线侵入补偿后占用区: {(sx0, sy0, sx1, sy1)} / {zc}"
+
+    # ---- 原位补印：筛选绘制、坐标/编号不变、留白与明确错误 ----
+    from .svg import resolve_reprint_selection
+
+    # 序号解析：空选择、页内序号超范围、页码超范围均为明确中文错误
+    def _expect_reprint_error(page_no, indices, key: str) -> None:
+        try:
+            resolve_reprint_selection(gp, page_no, indices)
+        except ValueError as exc:
+            assert key in str(exc), f"错误信息未包含「{key}」: {exc}"
+            return
+        raise AssertionError(f"补印选择 {page_no}/{indices} 应被拦截（{key}）却通过")
+
+    _expect_reprint_error(1, [], "为空")
+    _expect_reprint_error(1, [1, 5], "超出范围")   # 第 1 页只有 4 个标签
+    _expect_reprint_error(1, [0], "超出范围")
+    _expect_reprint_error(9, [1], "页码超出范围")
+    assert resolve_reprint_selection(gp, 1, [1, 3, 3]) == {0, 2}  # 去重
+
+    # 只绘制选中标签：轮廓数量、编号文本；页码、页边距线留白
+    re_svg = build_svg(gp, 1, only={0, 2})
+    assert re_svg.count('class="label"') == 2
+    assert ">P-001</text>" in re_svg and ">P-003</text>" in re_svg
+    assert ">P-002</text>" not in re_svg and ">P-004</text>" not in re_svg
+    assert 'class="marginguide"' not in re_svg
+    assert 'class="pageno"' not in re_svg
+    assert "原位补印" in re_svg
+    # 坐标与完整导出逐字一致：不重排、不重新编号
+    full_svg = build_svg(gp, 1)
+    for frag in (
+        '<rect class="label" x="0" y="0" width="50" height="50"/>',
+        '<rect class="label" x="0" y="50" width="50" height="50"/>',
+    ):
+        assert frag in re_svg and frag in full_svg
+
+    # 选中标签的裁切角线仍按完整排版避让（含未选标签）且不画出纸外
+    grid_rects = [
+        (l.x, l.y, l.x + l.width, l.y + l.height) for l in gp.pages[0].labels
+    ]
+    for sx0, sy0, sx1, sy1 in _cut_segments_of(re_svg):
+        assert sx0 >= -1e-6 and sy0 >= -1e-6
+        assert sx1 <= 100 + 1e-6 and sy1 <= 100 + 1e-6
+        for rx0, ry0, rx1, ry1 in grid_rects:
+            assert not (
+                sx0 < rx1 - 1e-6 and sx1 > rx0 + 1e-6
+                and sy0 < ry1 - 1e-6 and sy1 > ry0 + 1e-6
+            ), f"补印角线侵入标签: {(sx0, sy0, sx1, sy1)} / {(rx0, ry0, rx1, ry1)}"
+
+    # 补印导出沿用打印校准补偿（逆变换坐标 + 校准注释）
+    re_cal = build_svg(gp, 1, calibration=cal, only={1})
+    assert "打印位置校准已应用" in re_cal
+    assert re_cal.count('class="label"') == 1
+    assert ">P-002</text>" in re_cal
+    lab1 = gp.pages[0].labels[1]
+    assert f'x="{_fmt((lab1.x - cal.x.offset) / cal.x.scale)}"' in re_cal
+
+    # 补印导出绝不绘制占用区（即便误传 show_occupied）
+    assert 'class="occupied"' not in build_svg(p2, 1, show_occupied=True, only={0})
 
 
     print(f"[bootstrap] 自检通过（FastAPI {fastapi.__version__}, "

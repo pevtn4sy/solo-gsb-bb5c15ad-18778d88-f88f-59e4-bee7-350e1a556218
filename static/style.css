@@ -185,6 +185,21 @@ button:disabled { opacity: 0.45; cursor: default; }
   box-shadow: 0 2px 12px rgba(0,0,0,0.18);
 }
 
+/* ---------------- 原位补印 ---------------- */
+
+.reprint-bar {
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  margin: -4px 0 12px; font-size: 13px;
+}
+.reprint-info { color: #374151; }
+.reprint-info strong { color: var(--danger); }
+.reprint-hint { color: var(--muted); font-size: 12px; }
+.reprint-hit { fill: transparent; stroke: none; pointer-events: all; cursor: pointer; }
+.reprint-hit:hover { fill: rgba(37, 99, 235, 0.15); }
+.reprint-hit.selected {
+  fill: rgba(220, 38, 38, 0.25); stroke: #dc2626; stroke-width: 0.4;
+}
+
 #error-banner {
   display: none;
   margin-top: 10px; padding: 8px 10px; border-radius: 6px;
